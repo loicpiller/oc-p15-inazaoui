@@ -1,0 +1,14 @@
+.git
+.gitignore
+vendor
+var
+backup.zip
+**/backup.zip
+public/uploads/**
+.env.local
+.env.local.php
+.env.*.local
+config/secrets/**
+*.pem
+*.key
+node_modules

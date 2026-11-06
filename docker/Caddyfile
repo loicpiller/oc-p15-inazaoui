@@ -1,0 +1,13 @@
+{
+    auto_https off
+    frankenphp
+}
+:80 {
+    root * /app/public
+    @hidden path_regexp hidden (^|/)\.
+    @upload_php path_regexp upload_php (?i)^/uploads/.*\.(php[0-9]*|phtml|phar)(/|$)
+    respond @hidden 404
+    respond @upload_php 404
+    encode zstd gzip
+    php_server
+}
