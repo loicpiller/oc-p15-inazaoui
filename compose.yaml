@@ -1,0 +1,38 @@
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8080}:80"
+    environment:
+      APP_ENV: dev
+      APP_DEBUG: '1'
+      APP_SECRET: local-development-secret-only
+      DATABASE_URL: 'postgresql://app:app@database:5432/app?serverVersion=16&charset=utf8'
+      XDG_DATA_HOME: /tmp/caddy-data
+      XDG_CONFIG_HOME: /tmp/caddy-config
+      COMPOSER_HOME: /tmp/composer
+      COMPOSER: /app/composer.json
+    volumes:
+      - .:/app
+      - vendor:/app/vendor
+      - var:/app/var
+    depends_on:
+      database:
+        condition: service_healthy
+  database:
+    image: postgres:16.15-bookworm
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+volumes:
+  database:
+  vendor:
+  var:
