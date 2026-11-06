@@ -42,7 +42,7 @@ class RoutesTest extends TestCase
                 $route = $routes->get($name);
                 self::assertNotNull($route, $name);
                 self::assertSame($path, $route->getPath(), $name);
-                self::assertSame(['_controller' => $controller] + ('portfolio' === $name ? ['id' => null] : []), $route->getDefaults(), $name);
+                self::assertEquals(['_controller' => $controller] + ('portfolio' === $name ? ['id' => null] : []), $route->getDefaults(), $name);
                 self::assertSame([], $route->getRequirements(), $name);
                 self::assertSame([], $route->getMethods(), $name);
                 self::assertSame([], $route->getSchemes(), $name);
