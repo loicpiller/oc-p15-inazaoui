@@ -16,4 +16,6 @@ if [ "${1:-}" = frankenphp ] && [ ! -f /app/vendor/autoload.php ]; then
     echo 'Dependencies missing: run docker compose run --rm app composer install first.' >&2
     exit 1
 fi
+# /app is a host bind mount owned by a different UID; prevents git dubious-ownership errors.
+git config --system --replace-all safe.directory /app
 exec gosu www-data "$@"

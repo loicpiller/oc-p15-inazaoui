@@ -12,7 +12,11 @@ from pathlib import Path, PurePosixPath
 
 os.chdir('/app/public')
 archive = Path('/app/backup.zip')
-env = dict(os.environ, PGHOST='database', PGUSER='app', PGPASSWORD='app', PGDATABASE='app')
+# PGDATABASE sets the target database (default: app).
+env = dict(os.environ, PGHOST='database', PGUSER='app', PGPASSWORD='app', PGDATABASE=os.environ.get('PGDATABASE', 'app'))
+target = env['PGDATABASE']
+# RESTORE_VALIDATE_ONLY=1 restores data without copying files for isolated validation.
+validate_only = os.environ.get('RESTORE_VALIDATE_ONLY') == '1'
 TABLES = ('user', 'album', 'media')
 
 
@@ -25,8 +29,7 @@ def sql(query):
 
 
 def statements(text, table):
-    # Split SQL at unquoted semicolons, handling SQL strings, identifiers and comments.
-    # Reject psql commands and dollar quoting: neither is needed in INSERT dumps.
+    # Split SQL statements at unquoted semicolons; psql commands and dollar quoting are rejected.
     result, buf = [], []
     i, state = 0, 'plain'
     while i < len(text):
@@ -103,19 +106,31 @@ try:
             rel = PurePosixPath(*tail)
             if rel in uploads: raise ValueError('Upload en double : ' + str(rel))
             uploads.add(rel)
-            target = staged.joinpath(*tail)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with z.open(item) as source, target.open('xb') as output:
+            staged_path = staged.joinpath(*tail)
+            staged_path.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(item) as source, staged_path.open('xb') as output:
                 shutil.copyfileobj(source, output)
         if not uploads: raise ValueError('Aucun fichier uploads trouvé dans l’archive')
         for _ in range(60):
             if subprocess.run(['pg_isready', '-h', 'database', '-U', 'app', '-d', 'app'], env=env, stdout=subprocess.DEVNULL).returncode == 0: break
             time.sleep(1)
         else: raise RuntimeError('PostgreSQL indisponible')
+        # Validate-only must never reach the app database by mistake.
+        if validate_only and target == 'app':
+            raise RuntimeError('RESTORE_VALIDATE_ONLY exige un PGDATABASE explicite et différent de app')
         if sql("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f')") != '0':
             raise RuntimeError('La base contient déjà des objets ; restauration refusée')
+        # psql and Doctrine may resolve different databases (test env appends _test); check both before any mutation.
+        psql_db = sql('SELECT current_database()')
+        probe = subprocess.run(('php', '/app/bin/console', 'dbal:run-sql', 'SELECT current_database()'), env=env, capture_output=True, text=True)
+        lines = [line.strip() for line in (probe.stdout or probe.stderr).strip().splitlines() if line.strip() and set(line.strip()) != {'-'}]
+        if probe.returncode != 0 or not lines:
+            raise RuntimeError('Vérification Doctrine impossible : ' + (lines[-1] if lines else 'aucune sortie'))
+        doctrine_db = lines[-1]
+        if psql_db != target or doctrine_db != target:
+            raise RuntimeError(f'Cible incohérente : PGDATABASE={target}, psql={psql_db}, Doctrine={doctrine_db} ; restauration refusée')
         dest = Path('/app/public/uploads')
-        if dest.is_symlink() or not dest.is_dir() or any(p.name != '.gitignore' or p.is_symlink() for p in dest.iterdir()):
+        if not validate_only and (dest.is_symlink() or not dest.is_dir() or any(p.name != '.gitignore' or p.is_symlink() for p in dest.iterdir())):
             raise RuntimeError('Le dossier uploads est absent, lié ou non vide ; restauration refusée')
         print('Création du schéma Doctrine local...', flush=True)
         run('php', '/app/bin/console', 'doctrine:schema:create', '--no-interaction')
@@ -135,10 +150,13 @@ try:
             if len(parts) < 2 or parts[0] != 'uploads' or any(p in ('', '.', '..') for p in parts) or '\\' in path or PurePosixPath(*parts[1:]) not in uploads:
                 missing.append(path)
         if missing: raise RuntimeError(f'{len(missing)} chemins média absents ou invalides : {missing[:5]}')
-        for rel in uploads:
-            target = dest.joinpath(*rel.parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with (staged / rel).open('rb') as source, target.open('xb') as output: shutil.copyfileobj(source, output)
-        print('Restauration vérifiée : 5 albums, 101 utilisateurs, 5050 médias, fichiers présents.')
+        if not validate_only:
+            for rel in uploads:
+                path = dest.joinpath(*rel.parts)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with (staged / rel).open('rb') as source, path.open('xb') as output: shutil.copyfileobj(source, output)
+            print('Restauration vérifiée : 5 albums, 101 utilisateurs, 5050 médias, fichiers présents.')
+        else:
+            print('Validation isolée vérifiée : 5 albums, 101 utilisateurs, 5050 médias, chemins conformes à l\'archive ; aucune copie de fichiers.')
 except (Exception, KeyboardInterrupt) as exc:
     sys.exit(f'Restauration interrompue : {exc}. Si le schéma ou des fichiers ont été créés, état partiel : consulter docs/docker.md avant reprise.')

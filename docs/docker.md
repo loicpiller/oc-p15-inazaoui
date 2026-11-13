@@ -1,43 +1,44 @@
 # Développement avec Docker
 
-Prérequis : Docker Engine et Docker Compose, accès réseau aux registres et à Composer. Le serveur est uniquement local : <http://localhost:8080>. Pour choisir un autre port, exporter `HTTP_PORT=8081` avant les commandes Compose. PostgreSQL n'expose aucun port hôte. Les identifiants et secrets de Compose sont uniquement destinés au développement local.
+Prérequis : Docker Engine et Docker Compose. Serveur local uniquement : <http://localhost:8080> (autre port via `HTTP_PORT`). Identifiants et secrets Compose réservés au développement local.
 
 ```sh
 docker compose build
-./scripts/install.sh                 # composer install avec dépendances dev, puis check-platform-reqs
+./scripts/install.sh                 # composer install with dev deps, then check-platform-reqs
 docker compose up -d
-./scripts/restore.sh                 # facultatif : exige ./backup.zip
+./scripts/restore.sh                 # optional: requires ./backup.zip
 ```
 
-L'installation équivalente sans script est :
-
-```sh
-docker compose run --rm app sh -c 'cd /app && composer install --no-interaction'
-docker compose run --rm app sh -c 'cd /app && composer check-platform-reqs'
-```
-
-Le code et `public/uploads` sont montés depuis le dossier local ; les volumes nommés `vendor`, `var` et `database` contiennent respectivement les dépendances, le cache et les données PostgreSQL. Serveur et commandes tournent sous le même utilisateur `www-data`, avec umask 002 ; les fichiers créés dans les uploads doivent rester accessibles depuis l'hôte. Sur Linux, si nécessaire, autoriser l'UID du conteneur à écrire dans `public/uploads` par groupe ou ACL. Ne pas ouvrir les permissions à tous. Les variables Compose remplacent `.env` aussi pour la CLI ; aucun fichier `.env` n'est modifié.
+Le code et `public/uploads` sont montés depuis le dossier local ; les volumes `vendor`, `var` et `database` contiennent dépendances, cache et données PostgreSQL. Tout tourne sous `www-data`, umask 002 ; sur Linux, si nécessaire, donner l'accès en écriture aux uploads par groupe ou ACL, sans permissions ouvertes à tous.
 
 ```sh
 docker compose logs -f app database
-docker compose exec -w /app app composer show symfony/framework-bundle
 docker compose exec -w /app app composer check-platform-reqs
-docker compose exec app php /app/bin/console about
-docker compose exec app php /app/bin/console debug:router
-docker compose exec -w /app app vendor/bin/phpunit
+docker compose exec -T -e APP_ENV=test -w /app app vendor/bin/phpunit
 docker compose restart
-docker compose down                   # conserve les volumes et les uploads
+docker compose down                   # keeps volumes and uploads
 ```
 
-PHPUnit ne trouve actuellement aucun test dans le dépôt. Le compte de développement est `ina` / `password`.
+PHPUnit exige `APP_ENV=test` : celui de Compose (`dev`) doit être surchargé, sinon les tests échouent. Sous `APP_ENV=test`, Doctrine ajoute le suffixe `_test` à l'URL Compose et la suite vise donc `app_test` : la peupler d'abord (voir « Base de test »), sinon `FunctionalTest` échoue. Compte de développement : `ina` / `password`.
+
+## Base de test
+
+`app_test` est peuplée sans fichiers depuis `backup.zip` via `scripts/restore.py` en mode validation. La base doit être vide : le script refuse tout objet public et crée lui-même le schéma. Procédure exacte, sans toucher à `app` ni aux uploads (le drop/recreate est sans danger même si `app_test` existe déjà avec des tables vides) :
+
+```sh
+# Recreate an empty app_test database (app and uploads are never touched)
+docker compose exec -T database psql -U app -d app -c 'DROP DATABASE IF EXISTS app_test WITH (FORCE)' -c 'CREATE DATABASE app_test'
+# Populate app_test from the archive without copying any file
+docker compose run --rm -e APP_ENV=dev -e RESTORE_VALIDATE_ONLY=1 -e PGDATABASE=app_test -e DATABASE_URL='postgresql://app:app@database:5432/app_test?serverVersion=16&charset=utf8' app python3 /app/scripts/restore.py
+```
+
+`APP_ENV=dev` explicite évite le suffixe `_test` du test env. Le script vérifie, avant toute mutation, que `PGDATABASE` et `DATABASE_URL` désignent la même base, et exige en mode validation une cible explicitement différente de `app`.
 
 ## Restauration
 
-Placer l'archive locale non suivie `backup.zip` à la racine après l'installation. Elle doit contenir exactement un fichier de chaque nom `user.sql`, `album.sql` et `media.sql`, avec des instructions PostgreSQL `INSERT INTO` pour la table correspondante, ainsi que des fichiers sous un dossier `uploads`. Les fichiers peuvent être rangés dans des sous-dossiers de l'archive. Les instructions sont analysées avant toute création de schéma ; les commandes psql, le dollar quoting et les formats SQL autres que des INSERT ne sont pas acceptés. L'archive et son SQL doivent provenir d'une source fiable.
+Placer l'archive locale non suivie `backup.zip` à la racine : un fichier de chaque nom `user.sql`, `album.sql`, `media.sql` en `INSERT INTO` PostgreSQL, plus les fichiers sous un dossier `uploads` (sous-dossiers admis). Commandes psql, dollar quoting et autres formats rejetés ; source fiable exigée.
 
-Le script vérifie l'archive et prépare les uploads dans un dossier temporaire, attend PostgreSQL, refuse une base contenant des objets ou un dossier uploads non vide, puis crée le schéma depuis les mappings Doctrine. Il importe user, album et media dans une transaction PostgreSQL, vérifie 5 albums, 101 utilisateurs et 5050 médias et recale leurs séquences. Il vérifie ensuite que chaque chemin de média correspond à un fichier extrait sous `public/uploads`, avant de copier les fichiers. Les métadonnées macOS sont ignorées ; les chemins d'archive dangereux, doublons et liens symboliques sont refusés.
-
-En cas d'échec après création du schéma, la base peut contenir le schéma seul ou les données ; une interruption pendant la copie peut aussi laisser des uploads partiels. Examiner et sauvegarder les données utiles, supprimer manuellement les seuls uploads partiels concernés, puis utiliser le reset ci-dessous avant de recommencer. Le reset conserve volontairement les uploads ; leur présence empêche une nouvelle restauration.
+Le script refuse une base contenant des objets ou un dossier `public/uploads` non vide, vérifie l'égalité des cibles psql et Doctrine avant toute mutation, crée le schéma Doctrine, importe les trois tables en transaction (5 albums, 101 utilisateurs, 5050 médias, séquences recalées), puis vérifie chaque chemin de média avant de copier les fichiers. Chemins d'archive dangereux, doublons et liens symboliques refusés. En cas d'échec après coup : examiner la base et supprimer manuellement les uploads partiels, puis reset avant de recommencer.
 
 ## Reset destructif
 
@@ -45,10 +46,12 @@ En cas d'échec après création du schéma, la base peut contenir le schéma se
 ./scripts/reset.sh --yes
 ```
 
-Cette commande arrête le projet et supprime les volumes Compose `database` (toutes les données), `vendor` et `var` (cache et logs). Elle préserve les fichiers de `public/uploads` sur l'hôte et l'archive. Pour repartir, relancer build si nécessaire, installation, démarrage et restauration. Ne pas utiliser `docker compose down -v` à la légère : il supprime les mêmes volumes.
+Supprime les volumes `database` (toutes les données), `vendor` et `var`, préserve `public/uploads` et l'archive. Attention : `docker compose down -v` fait pareil.
 
-## Chemins et limites de l'application
+## Chemins et limites
 
-FrankenPHP tourne sans worker depuis `/app/public` : les chemins relatifs `uploads/...` correspondent à `public/uploads` pour la création et la suppression. Symfony retire le préfixe du nom transmis à `move`, évitant `uploads/uploads`. Le serveur ne publie que `public/`, refuse les fichiers cachés et les scripts PHP dans les uploads.
+FrankenPHP tourne sans worker depuis `/app/public` ; les chemins relatifs `uploads/...` correspondent à `public/uploads`. Le serveur ne publie que `public/` et refuse fichiers cachés et scripts PHP dans les uploads. Avec une base vide, les pages nécessitant des tables échouent jusqu'à restauration.
 
-Avec une base vide, les pages nécessitant des tables échouent jusqu'à restauration. Avec des données synthétiques, la connexion `ina`, l'accès à la liste d'administration et la création persistante d'un album ont été vérifiés.
+## Doctrine
+
+Le plancher PHP de `composer.json` (`>= 8.2`) reflète le minimum réel de DBAL 4.5 ; vérifier chaque montée par `composer why-not <paquet>` et garder `composer audit` vierge. `identity_generation_preferences` (séquence `{table}_id_seq`) préserve les schémas créés avant DBAL 4 ; `use_savepoints` a été retiré (toujours actif en DBAL 4).
